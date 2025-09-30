@@ -14,6 +14,13 @@ class WorkerState:
         self.memory_usage = None # memory
         self.last_seen = time.time()  # timestamp of last seen worker
         
+    def update_state(self, cpu, memory, timestamp):
+        self.cpu_usage = cpu
+        self.memory_usage = memory
+        self.last_seen = timestamp or time.time()
+        
+    def is_idle(self, threshold=10):
+        return (time.time() - self.last_seen) > threshold
         
 class WorkerInfo:
     def __init__(self, host, port=6000):
@@ -31,19 +38,7 @@ class WorkerInfo:
             self.workers[worker_id] = WorkerState(conn, addr)
             print(f"Worker {worker_id} registered from {addr}")
             self.worker_id += 1
-            
-    def remove_worker(self, worker_id):
-        with self.lock:
-            if worker_id in self.workers:
-                del self.workers[worker_id]
-                print(f"Worker {worker_id} removed because of idle timeout") # delete idling workers
-                
-    def get_worker_states(self):
-        with self.lock:
-            w = self.workers.get(worker_id)
-            if w:
-            return {wid: (state.cpu_usage, state.memory_usage, state.last_seen) for wid, state in self.workers.items()}
-            
+                        
 class RPCHandler:
     def __init__(self, worker_info):
         
