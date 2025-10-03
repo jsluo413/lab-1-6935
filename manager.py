@@ -7,7 +7,7 @@ from multiprocessing.connection import Listener, Client
 from threading import Thread, Lock
 
 # --- Configuration ---
-MANAGER_ADDRESS = ('127.0.0.1', 9999)
+MANAGER_ADDRESS = ('10.128.0.2', 9999)
 WORKER_TIMEOUT_SECONDS = 60
 AUTH_KEY = b'secret-key'  # Shared secret for authentication
 
