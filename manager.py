@@ -57,6 +57,11 @@ def manage_workers():
         with REGISTRY_LOCK:
             current_workers = list(WORKER_REGISTRY.items())
             
+        if not current_workers:
+            print("MONITOR: No active workers found.")
+            time.sleep(10)
+            continue
+        
         for worker_id, info in current_workers:
             response = call_rpc(info['address'], 'get_system_status')
             if response['status'] == 'SUCCESS':
@@ -65,7 +70,7 @@ def manage_workers():
                         WORKER_REGISTRY[worker_id]['last_seen'] = time.time()
                 status = response['result']
                 worker_statuses.append({**status, 'address': info['address']})
-                print(f"✅ {worker_id} | CPU: {status['cpu']:.1f}% | Memory: {status['mem']:.1f}%")
+                print(f"✅ {worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
             else:
                 print(f"❌ {worker_id} | Status Check Failed: {response['message']}")
 
