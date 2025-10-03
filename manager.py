@@ -1,12 +1,13 @@
 import json
 import time
 import sys
+import argparse
 
 from multiprocessing.connection import Listener, Client
 from threading import Thread, Lock
 
 # --- Configuration ---
-MANAGER_ADDRESS = ('10.128.0.2', 9999)
+MANAGER_ADDRESS = ('127.0.0.1', 9999)
 WORKER_TIMEOUT_SECONDS = 60
 AUTH_KEY = b'secret-key'  # Shared secret for authentication
 
@@ -14,6 +15,10 @@ IDLE_TIMEOUT_SECONDS = 120  # 2 minutes
 
 WORKER_REGISTRY = {}
 REGISTRY_LOCK = Lock()
+
+# --- Job Tracking ---
+JOB_HISTORY = []
+JOB_LOCK = Lock()
 
 # --- RPC Client for Calling Workers ---
 def call_rpc(address, function_name, *args, **kwargs):
@@ -70,32 +75,62 @@ def select_round_robin(workers):
     return workers[idx]
 
 
-def assign_task(worker_id, addr):
+def assign_task(job_id, worker_id, addr, meta=None):
     with REGISTRY_LOCK:
         if worker_id in WORKER_REGISTRY:
             WORKER_REGISTRY[worker_id]['busy'] = True
             WORKER_REGISTRY[worker_id]['last_task_start'] = time.time()
+    start_ts = time.time()
     response = call_rpc(addr, 'calculate_pi', num_terms=20_000_000)
-    print(f"ASSIGNMENT: Response -> {response.get('result') or response.get('message')}")
+    end_ts = time.time()
+    duration = end_ts - start_ts
+    print(f"ASSIGNMENT #{job_id}: Response -> {response.get('result') or response.get('message')} in {duration:.2f}s")
     with REGISTRY_LOCK:
         if worker_id in WORKER_REGISTRY:
             WORKER_REGISTRY[worker_id]['busy'] = False
             WORKER_REGISTRY[worker_id]['last_task_end'] = time.time()
+    job_record = {
+        'job_id': job_id,
+        'worker_id': worker_id,
+        'worker_addr': addr,
+        'dispatched_cpu': (meta or {}).get('cpu'),
+        'dispatched_mem': (meta or {}).get('mem'),
+        'start_ts': start_ts,
+        'end_ts': end_ts,
+        'duration': duration,
+        'status': response.get('status'),
+        'error': response.get('message') if response.get('status') != 'SUCCESS' else None,
+    }
+    with JOB_LOCK:
+        JOB_HISTORY.append(job_record)
     return response
 
 # --- Main Manager Logic ---
-def manage_workers(strategy):
+def manage_workers(strategy, jobs=None, interval=5.0):
+    """Manage workers and optionally launch a fixed number of jobs at a given interval.
+
+    - strategy: 'lowest_cpu' or 'round_robin'
+    - jobs: if None, runs continuously; otherwise launches `jobs` tasks and summarizes
+    - interval: seconds between consecutive job launches
+    """
+    last_launch = 0.0
+    launched = 0
+    job_threads = []
+    print_interval_header_done = False
+
     while True:
-        print("\n--- Monitoring Active Workers ---")
         worker_statuses = []
         with REGISTRY_LOCK:
             current_workers = list(WORKER_REGISTRY.items())
-            
+
         if not current_workers:
+            if not print_interval_header_done:
+                print("\n--- Waiting For Workers ---")
             print("MONITOR: No active workers found.")
-            time.sleep(5)
+            time.sleep(2)
             continue
-        
+
+        print("\n--- Monitoring Active Workers ---")
         for worker_id, info in current_workers:
             response = call_rpc(info['address'], 'get_system_status')
             if response['status'] == 'SUCCESS':
@@ -107,45 +142,107 @@ def manage_workers(strategy):
                 print(f"{worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
             else:
                 print(f"{worker_id} | Status Check Failed: {response['message']}")
-        
+
         # idle detection
         now = time.time()
         with REGISTRY_LOCK:
             for wid, info in WORKER_REGISTRY.items():
                 if not info['busy'] and info['last_task_end'] and (now - info['last_task_end'] > IDLE_TIMEOUT_SECONDS):
                     print(f"IDLE DETECTION: {wid} has been idle for over 2 minutes.")
-                    
-        if worker_statuses:
+
+        # Launch logic (continuous or batch)
+        should_launch = (now - last_launch) >= float(interval)
+        batch_mode = jobs is not None
+        can_launch = True if not batch_mode else (launched < jobs)
+
+        if worker_statuses and should_launch and can_launch:
             best_worker = (
-            select_lowest_cpu(worker_statuses)
-            if strategy == 'lowest_cpu'
-            else select_round_robin(worker_statuses)
+                select_lowest_cpu(worker_statuses)
+                if strategy == 'lowest_cpu'
+                else select_round_robin(worker_statuses)
             )
 
-            print(f"\n--- Load Balancing ---")
+            print("\n--- Load Balancing ---")
             worker_id = best_worker['worker_id']
-            print(f"Selected worker: {worker_id} ({best_worker['address'][0]}:{best_worker['address'][1]}) with {best_worker['cpu']:.1f}% CPU.")
-            # Assign task in a separate thread to avoid blocking
-            Thread(target=assign_task, args=(worker_id, best_worker['address']), daemon=True).start()
-        
-        time.sleep(5)
+            print(
+                f"Selected worker: {worker_id} ({best_worker['address'][0]}:{best_worker['address'][1]}) with {best_worker['cpu']:.1f}% CPU."
+            )
+
+            launched += 1
+            job_id = launched
+            last_launch = now
+            t = Thread(
+                target=assign_task,
+                args=(job_id, worker_id, best_worker['address'], {'cpu': best_worker['cpu'], 'mem': best_worker['mem']}),
+                daemon=True,
+            )
+            t.start()
+            job_threads.append(t)
+
+        # Batch completion and summary
+        if batch_mode and launched >= jobs:
+            with JOB_LOCK:
+                completed = len(JOB_HISTORY)
+            if completed >= jobs:
+                summarize_batch(strategy=strategy, jobs=jobs, interval=interval)
+                return
+
+        time.sleep(1)
+
+
+def summarize_batch(strategy, jobs, interval):
+    with JOB_LOCK:
+        records = list(JOB_HISTORY)
+
+    if not records:
+        print("No job records to summarize.")
+        return
+
+    durations = [r['duration'] for r in records]
+    start_times = [r['start_ts'] for r in records]
+    end_times = [r['end_ts'] for r in records]
+    makespan = max(end_times) - min(start_times)
+
+    per_worker = {}
+    for r in records:
+        per_worker[r['worker_id']] = per_worker.get(r['worker_id'], 0) + 1
+
+    errors = [r for r in records if r['status'] != 'SUCCESS']
+
+    print("\n=== Batch Summary ===")
+    print(f"Strategy: {strategy}")
+    print(f"Jobs Launched: {jobs}")
+    print(f"Interval: {interval}s")
+    print(f"Average Duration: {sum(durations)/len(durations):.2f}s")
+    print(f"Min Duration: {min(durations):.2f}s | Max Duration: {max(durations):.2f}s")
+    print(f"Makespan (first start to last end): {makespan:.2f}s")
+    print("Jobs per worker:")
+    
+    for wid, count in sorted(per_worker.items()):
+        print(f"  - {wid}: {count}")
+    if errors:
+        print("Errors:")
+        for e in errors:
+            print(f"  - Job {e['job_id']} on {e['worker_id']}: {e['error']}")
         
 if __name__ == "__main__":
-    allowed = {"lowest_cpu", "round_robin"}
-    if len(sys.argv) > 1:
-        arg = sys.argv[1].strip().lower()
-        if arg in allowed:
-            user_strategy = arg
-        else:
-            print(f"Invalid strategy: {arg}\nUsage: python3 manager.py [lowest_cpu|round_robin]")
-            sys.exit(2)
-    else:
-        print(f"No strategy provided. Defaulting to 'lowest_cpu'. Optional usage: python3 manager.py [lowest_cpu|round_robin]")
-        user_strategy = 'lowest_cpu'
+    parser = argparse.ArgumentParser(description="Distributed Manager")
+    parser.add_argument('strategy', nargs='?', choices=['lowest_cpu', 'round_robin'], default='lowest_cpu',
+                        help="Worker selection strategy")
+    parser.add_argument('-n', '--jobs', type=int, default=None,
+                        help="Number of jobs to launch (batch mode); default is continuous")
+    parser.add_argument('-i', '--interval', type=float, default=5.0,
+                        help="Seconds between job launches (default 5.0)")
 
-    print(f"Manager starting with strategy: {user_strategy}")
+    args = parser.parse_args()
+    user_strategy = args.strategy
+
+    if args.jobs is not None:
+        print(f"Manager starting in BATCH mode: strategy={user_strategy}, jobs={args.jobs}, interval={args.interval}s")
+    else:
+        print(f"Manager starting in CONTINUOUS mode: strategy={user_strategy}, interval={args.interval}s")
+
     registry_thread = Thread(target=run_registry_server, daemon=True)
     registry_thread.start()
-    manage_workers(strategy=user_strategy)
+    manage_workers(strategy=user_strategy, jobs=args.jobs, interval=args.interval)
     
-
