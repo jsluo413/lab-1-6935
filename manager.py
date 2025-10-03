@@ -10,6 +10,8 @@ MANAGER_ADDRESS = ('10.128.0.2', 9999)
 WORKER_TIMEOUT_SECONDS = 60
 AUTH_KEY = b'secret-key'  # Shared secret for authentication
 
+IDLE_TIMEOUT_SECONDS = 120  # 2 minutes
+
 WORKER_REGISTRY = {}
 REGISTRY_LOCK = Lock()
 
@@ -44,7 +46,10 @@ def run_registry_server():
                         print(f"REGISTRY: Registering {worker_id}")
                         WORKER_REGISTRY[worker_id] = {
                             'address': (reg_data['host'], reg_data['port']),
-                            'last_seen': time.time()
+                            'last_seen': time.time(),
+                            'busy': False,
+                            'last_task_start': None,
+                            'last_task_end': time.time()
                         }
                     conn.send({'status': 'SUCCESS', 'worker_id': worker_id})
             except Exception as e:
@@ -63,9 +68,19 @@ def select_round_robin(workers):
     idx = manage_workers._rr_index % len(workers)
     manage_workers._rr_index += 1
     return workers[idx]
-def assign_task(addr):
+
+
+def assign_task(worker_id, addr):
+    with REGISTRY_LOCK:
+        if worker_id in WORKER_REGISTRY:
+            WORKER_REGISTRY[worker_id]['busy'] = True
+            WORKER_REGISTRY[worker_id]['last_task_start'] = time.time()
     response = call_rpc(addr, 'calculate_pi', num_terms=20_000_000)
     print(f"ASSIGNMENT: Response -> {response.get('result') or response.get('message')}")
+    with REGISTRY_LOCK:
+        if worker_id in WORKER_REGISTRY:
+            WORKER_REGISTRY[worker_id]['busy'] = False
+            WORKER_REGISTRY[worker_id]['last_task_end'] = time.time()
     return response
 
 # --- Main Manager Logic ---
@@ -78,7 +93,7 @@ def manage_workers(strategy):
             
         if not current_workers:
             print("MONITOR: No active workers found.")
-            time.sleep(10)
+            time.sleep(5)
             continue
         
         for worker_id, info in current_workers:
@@ -92,7 +107,14 @@ def manage_workers(strategy):
                 print(f"{worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
             else:
                 print(f"{worker_id} | Status Check Failed: {response['message']}")
-
+        
+        # idle detection
+        now = time.time()
+        with REGISTRY_LOCK:
+            for wid, info in WORKER_REGISTRY.items():
+                if not info['busy'] and info['last_task_end'] and (now - info['last_task_end'] > IDLE_TIMEOUT_SECONDS):
+                    print(f"IDLE DETECTION: {wid} has been idle for over 2 minutes.")
+                    
         if worker_statuses:
             best_worker = (
             select_lowest_cpu(worker_statuses)
@@ -104,20 +126,22 @@ def manage_workers(strategy):
             worker_id = best_worker['worker_id']
             print(f"Selected worker: {worker_id} ({best_worker['address'][0]}:{best_worker['address'][1]}) with {best_worker['cpu']:.1f}% CPU.")
             # Assign task in a separate thread to avoid blocking
-            Thread(target=assign_task, args=(best_worker['address'],), daemon=True).start()
+            Thread(target=assign_task, args=(worker_id, best_worker['address']), daemon=True).start()
         
         time.sleep(5)
         
 if __name__ == "__main__":
     allowed = {"lowest_cpu", "round_robin"}
-    user_strategy = 'lowest_cpu'
-    if len(sys.argv) >= 2:
+    if len(sys.argv) > 1:
         arg = sys.argv[1].strip().lower()
         if arg in allowed:
             user_strategy = arg
         else:
-            print(f"Invalid strategy: {arg}\nUsage: python3 manager.py [lowest_cpu|round_robin]\nDefault: lowest_cpu")
+            print(f"Invalid strategy: {arg}\nUsage: python3 manager.py [lowest_cpu|round_robin]")
             sys.exit(2)
+    else:
+        print(f"No strategy provided. Defaulting to 'lowest_cpu'. Optional usage: python3 manager.py [lowest_cpu|round_robin]")
+        user_strategy = 'lowest_cpu'
 
     print(f"Manager starting with strategy: {user_strategy}")
     registry_thread = Thread(target=run_registry_server, daemon=True)
