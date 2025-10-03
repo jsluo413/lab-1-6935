@@ -1,4 +1,4 @@
-def calculate_pi(num_terms=1000000):
+def calculate_pi(num_terms):
     """Calculate an approximation of Pi
     """
     import time

@@ -79,7 +79,7 @@ def manage_workers():
             best_worker = min(worker_statuses, key=lambda w: w['cpu'])
             print(f"\n--- Load Balancing ---")
             print(f"Idle worker found: {best_worker['address'][0]}:{best_worker['address'][1]} with {best_worker['cpu']:.1f}% CPU.")
-            result = call_rpc(best_worker['address'], 'calculate_pi', digits=10000)
+            result = call_rpc(best_worker['address'], 'calculate_pi', num_terms=1000000)
             print(f"ASSIGNMENT: Response -> {result.get('result') or result.get('message')}")
         
         time.sleep(10)
