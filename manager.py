@@ -1,5 +1,6 @@
 import json
 import time
+import sys
 
 from multiprocessing.connection import Listener, Client
 from threading import Thread, Lock
@@ -45,7 +46,7 @@ def run_registry_server():
                             'address': (reg_data['host'], reg_data['port']),
                             'last_seen': time.time()
                         }
-                    conn.send({'status': 'SUCCESS'})
+                    conn.send({'status': 'SUCCESS', 'worker_id': worker_id})
             except Exception as e:
                 print(f"REGISTRY: Error during registration: {e}")
 # --- Worker Selection Strategies ---
@@ -62,9 +63,13 @@ def select_round_robin(workers):
     idx = manage_workers._rr_index % len(workers)
     manage_workers._rr_index += 1
     return workers[idx]
-        
+def assign_task(addr):
+    response = call_rpc(addr, 'calculate_pi', num_terms=20_000_000)
+    print(f"ASSIGNMENT: Response -> {response.get('result') or response.get('message')}")
+    return response
+
 # --- Main Manager Logic ---
-def manage_workers():
+def manage_workers(strategy):
     while True:
         print("\n--- Monitoring Active Workers ---")
         worker_statuses = []
@@ -83,14 +88,12 @@ def manage_workers():
                     if worker_id in WORKER_REGISTRY:
                         WORKER_REGISTRY[worker_id]['last_seen'] = time.time()
                 status = response['result']
-                worker_statuses.append({**status, 'address': info['address']})
-                print(f"✅ {worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
+                worker_statuses.append({**status, 'address': info['address'], 'worker_id': worker_id})
+                print(f"{worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
             else:
-                print(f"❌ {worker_id} | Status Check Failed: {response['message']}")
+                print(f"{worker_id} | Status Check Failed: {response['message']}")
 
         if worker_statuses:
-            # Choose strategy: 'lowest_cpu' or 'round_robin'
-            strategy = 'lowest_cpu'
             best_worker = (
             select_lowest_cpu(worker_statuses)
             if strategy == 'lowest_cpu'
@@ -98,16 +101,27 @@ def manage_workers():
             )
 
             print(f"\n--- Load Balancing ---")
-            worker_id = next((wid for wid, info in current_workers if info['address'] == best_worker['address']), 'unknown')
+            worker_id = best_worker['worker_id']
             print(f"Selected worker: {worker_id} ({best_worker['address'][0]}:{best_worker['address'][1]}) with {best_worker['cpu']:.1f}% CPU.")
-            result = call_rpc(best_worker['address'], 'calculate_pi', num_terms=20_000_000)
-            print(f"ASSIGNMENT: Response -> {result.get('result') or result.get('message')}")
+            # Assign task in a separate thread to avoid blocking
+            Thread(target=assign_task, args=(best_worker['address'],), daemon=True).start()
         
         time.sleep(5)
         
 if __name__ == "__main__":
+    allowed = {"lowest_cpu", "round_robin"}
+    user_strategy = 'lowest_cpu'
+    if len(sys.argv) >= 2:
+        arg = sys.argv[1].strip().lower()
+        if arg in allowed:
+            user_strategy = arg
+        else:
+            print(f"Invalid strategy: {arg}\nUsage: python3 manager.py [lowest_cpu|round_robin]\nDefault: lowest_cpu")
+            sys.exit(2)
+
+    print(f"Manager starting with strategy: {user_strategy}")
     registry_thread = Thread(target=run_registry_server, daemon=True)
     registry_thread.start()
-    manage_workers()
+    manage_workers(strategy=user_strategy)
     
 
