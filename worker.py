@@ -8,7 +8,7 @@ import json
 from multiprocessing.connection import Client, Listener
 from threading import Thread, Lock
 from monitor_lib import get_cpu_status, get_memory_status
-from calculate_pi import calculate_pi
+from calc_pi import calculate_pi
 
 
 
@@ -30,13 +30,12 @@ def get_system_status():
     return {'cpu': cpu_usage, 'mem': mem_usage}
 
 
-def calculate_pi(num_terms):
-    print("WORKER: Received task to calculate Pi to 1000 digits.")
+def get_pi(num_terms):
     return calculate_pi(num_terms)
 
 FUNCTION_MAP = {
     'get_system_status': get_system_status,
-    'calculate_pi': calculate_pi,
+    'calculate_pi': get_pi,
 }
 
 # --- Worker's RPC Server for Tasks ---

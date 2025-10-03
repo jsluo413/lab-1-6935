@@ -48,7 +48,21 @@ def run_registry_server():
                     conn.send({'status': 'SUCCESS'})
             except Exception as e:
                 print(f"REGISTRY: Error during registration: {e}")
-                
+# --- Worker Selection Strategies ---
+def select_lowest_cpu(workers):
+    if not workers:
+        return None
+    return min(workers, key=lambda w: w['cpu'])
+
+def select_round_robin(workers):
+    if not workers:
+        return None
+    if not hasattr(manage_workers, "_rr_index"):
+        manage_workers._rr_index = 0
+    idx = manage_workers._rr_index % len(workers)
+    manage_workers._rr_index += 1
+    return workers[idx]
+        
 # --- Main Manager Logic ---
 def manage_workers():
     while True:
@@ -74,11 +88,17 @@ def manage_workers():
             else:
                 print(f"❌ {worker_id} | Status Check Failed: {response['message']}")
 
-        # 3. Load Balance & Assign Task
         if worker_statuses:
-            best_worker = min(worker_statuses, key=lambda w: w['cpu'])
+            # Choose strategy: 'lowest_cpu' or 'round_robin'
+            strategy = 'lowest_cpu'
+            best_worker = (
+            select_lowest_cpu(worker_statuses)
+            if strategy == 'lowest_cpu'
+            else select_round_robin(worker_statuses)
+            )
+
             print(f"\n--- Load Balancing ---")
-            print(f"Idle worker found: {best_worker['address'][0]}:{best_worker['address'][1]} with {best_worker['cpu']:.1f}% CPU.")
+            print(f"Selected worker: {best_worker['address'][0]}:{best_worker['address'][1]} with {best_worker['cpu']:.1f}% CPU.")
             result = call_rpc(best_worker['address'], 'calculate_pi', num_terms=1000000)
             print(f"ASSIGNMENT: Response -> {result.get('result') or result.get('message')}")
         
