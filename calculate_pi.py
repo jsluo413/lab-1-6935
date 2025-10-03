@@ -1,9 +1,8 @@
-def calculate_pi():
-    """Calculate an approximation of Pi using the Leibniz formula.
+def calculate_pi(num_terms=1000000):
+    """Calculate an approximation of Pi
     """
     import time
     start_time = time.time()
-    num_terms = 1000000  # More terms for a better approximation
     pi_over_4 = 0.0
     for k in range(num_terms):
         pi_over_4 += ((-1) ** k) / (2 * k + 1)
