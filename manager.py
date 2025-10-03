@@ -98,11 +98,12 @@ def manage_workers():
             )
 
             print(f"\n--- Load Balancing ---")
-            print(f"Selected worker: {best_worker['address'][0]}:{best_worker['address'][1]} with {best_worker['cpu']:.1f}% CPU.")
-            result = call_rpc(best_worker['address'], 'calculate_pi', num_terms=1000000)
+            worker_id = next((wid for wid, info in current_workers if info['address'] == best_worker['address']), 'unknown')
+            print(f"Selected worker: {worker_id} ({best_worker['address'][0]}:{best_worker['address'][1]}) with {best_worker['cpu']:.1f}% CPU.")
+            result = call_rpc(best_worker['address'], 'calculate_pi', num_terms=20_000_000)
             print(f"ASSIGNMENT: Response -> {result.get('result') or result.get('message')}")
         
-        time.sleep(10)
+        time.sleep(5)
         
 if __name__ == "__main__":
     registry_thread = Thread(target=run_registry_server, daemon=True)
