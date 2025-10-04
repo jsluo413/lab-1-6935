@@ -2,7 +2,7 @@ import json
 import time
 import sys
 import argparse
-
+import os
 from multiprocessing.connection import Listener, Client
 from threading import Thread, Lock
 
@@ -21,8 +21,10 @@ JOB_HISTORY = []
 JOB_LOCK = Lock()
 
 # --- RPC Client for Calling Workers ---
+
+
 def call_rpc(address, function_name, *args, **kwargs):
-    """Sends an RPC request using multiprocessing.connection.Client."""
+    """Sends an RPC request"""
     request = {'function_name': function_name, 'args': args, 'kwargs': kwargs}
     try:
         with Client(address, authkey=AUTH_KEY) as conn:
@@ -31,8 +33,10 @@ def call_rpc(address, function_name, *args, **kwargs):
             return response
     except Exception as e:
         return {'status': 'ERROR', 'message': f"Communication failed: {e}"}
-    
+
 # --- Worker Registration ---
+
+
 def run_registry_server():
     """Listens for worker registrations."""
     with Listener(MANAGER_ADDRESS, authkey=AUTH_KEY) as listener:
@@ -60,12 +64,17 @@ def run_registry_server():
             except Exception as e:
                 print(f"REGISTRY: Error during registration: {e}")
 # --- Worker Selection Strategies ---
+
+
 def select_lowest_cpu(workers):
+    """Selects the worker with the lowest CPU usage."""
     if not workers:
         return None
     return min(workers, key=lambda w: w['cpu'])
 
+
 def select_round_robin(workers):
+    """Selects workers in a round-robin fashion."""
     if not workers:
         return None
     if not hasattr(manage_workers, "_rr_index"):
@@ -76,6 +85,7 @@ def select_round_robin(workers):
 
 
 def assign_task(job_id, worker_id, addr, meta=None):
+    print(f"JOB {job_id}: Assignning to {worker_id} ({addr[0]}:{addr[1]})")
     with REGISTRY_LOCK:
         if worker_id in WORKER_REGISTRY:
             WORKER_REGISTRY[worker_id]['busy'] = True
@@ -84,11 +94,15 @@ def assign_task(job_id, worker_id, addr, meta=None):
     response = call_rpc(addr, 'calculate_pi', num_terms=20_000_000)
     end_ts = time.time()
     duration = end_ts - start_ts
-    print(f"ASSIGNMENT #{job_id}: Response -> {response.get('result') or response.get('message')} in {duration:.2f}s")
+    result_text = (response.get('result')if response.get(
+        'status') == 'SUCCESS'else response.get('message'))
+    print(
+        f"JOB {job_id}: Completed by {worker_id} -> {result_text} in {duration:.2f}s")
     with REGISTRY_LOCK:
         if worker_id in WORKER_REGISTRY:
             WORKER_REGISTRY[worker_id]['busy'] = False
             WORKER_REGISTRY[worker_id]['last_task_end'] = time.time()
+
     job_record = {
         'job_id': job_id,
         'worker_id': worker_id,
@@ -106,13 +120,18 @@ def assign_task(job_id, worker_id, addr, meta=None):
     return response
 
 # --- Main Manager Logic ---
-def manage_workers(strategy, jobs=None, interval=5.0):
-    """Manage workers and optionally launch a fixed number of jobs at a given interval.
+
+
+def manage_workers(strategy, jobs, interval=5.0):
+    """Manage workers and launch a fixed number of jobs at a given interval.
 
     - strategy: 'lowest_cpu' or 'round_robin'
-    - jobs: if None, runs continuously; otherwise launches `jobs` tasks and summarizes
+    - jobs: total number of jobs to run
     - interval: seconds between consecutive job launches
     """
+    with JOB_LOCK:
+        JOB_HISTORY.clear()
+
     last_launch = 0.0
     launched = 0
     job_threads = []
@@ -126,10 +145,12 @@ def manage_workers(strategy, jobs=None, interval=5.0):
         if not current_workers:
             if not print_interval_header_done:
                 print("\n--- Waiting For Workers ---")
+                print_interval_header_done = True
             print("MONITOR: No active workers found.")
             time.sleep(2)
             continue
 
+        print_interval_header_done = False
         print("\n--- Monitoring Active Workers ---")
         for worker_id, info in current_workers:
             response = call_rpc(info['address'], 'get_system_status')
@@ -138,29 +159,29 @@ def manage_workers(strategy, jobs=None, interval=5.0):
                     if worker_id in WORKER_REGISTRY:
                         WORKER_REGISTRY[worker_id]['last_seen'] = time.time()
                 status = response['result']
-                worker_statuses.append({**status, 'address': info['address'], 'worker_id': worker_id})
-                print(f"{worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
+                worker_statuses.append(
+                    {**status, 'address': info['address'], 'worker_id': worker_id})
+                print(
+                    f"{worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
             else:
-                print(f"{worker_id} | Status Check Failed: {response['message']}")
+                print(
+                    f"{worker_id} | Status Check Failed: {response['message']}")
 
         # idle detection
         now = time.time()
         with REGISTRY_LOCK:
             for wid, info in WORKER_REGISTRY.items():
                 if not info['busy'] and info['last_task_end'] and (now - info['last_task_end'] > IDLE_TIMEOUT_SECONDS):
-                    print(f"IDLE DETECTION: {wid} has been idle for over 2 minutes.")
+                    print(
+                        f"IDLE DETECTION: {wid} has been idle for over 2 minutes.")
 
-        # Launch logic (continuous or batch)
+        # Launch logic
         should_launch = (now - last_launch) >= float(interval)
-        batch_mode = jobs is not None
-        can_launch = True if not batch_mode else (launched < jobs)
+        can_launch = launched < jobs
 
         if worker_statuses and should_launch and can_launch:
-            best_worker = (
-                select_lowest_cpu(worker_statuses)
-                if strategy == 'lowest_cpu'
-                else select_round_robin(worker_statuses)
-            )
+            best_worker = (select_lowest_cpu(worker_statuses)if strategy ==
+                           'lowest_cpu'else select_round_robin(worker_statuses))
 
             print("\n--- Load Balancing ---")
             worker_id = best_worker['worker_id']
@@ -173,30 +194,33 @@ def manage_workers(strategy, jobs=None, interval=5.0):
             last_launch = now
             t = Thread(
                 target=assign_task,
-                args=(job_id, worker_id, best_worker['address'], {'cpu': best_worker['cpu'], 'mem': best_worker['mem']}),
-                daemon=True,
+                args=(job_id, worker_id, best_worker['address'], {
+                      'cpu': best_worker['cpu'], 'mem': best_worker['mem']}),
             )
             t.start()
             job_threads.append(t)
 
-        # Batch completion and summary
-        if batch_mode and launched >= jobs:
-            with JOB_LOCK:
-                completed = len(JOB_HISTORY)
-            if completed >= jobs:
-                summarize_batch(strategy=strategy, jobs=jobs, interval=interval)
-                return
+        with JOB_LOCK:
+            completed = len(JOB_HISTORY)
+
+        if completed >= jobs:
+            break
 
         time.sleep(1)
+
+    for thread in job_threads:
+        thread.join()
+
+    summarize_batch(strategy=strategy, jobs=jobs, interval=interval)
+    print("All jobs completed. Manager will shut down in 10 seconds.")
+    time.sleep(10)
+    os._exit(0)
+    print("Manager exiting.")
 
 
 def summarize_batch(strategy, jobs, interval):
     with JOB_LOCK:
         records = list(JOB_HISTORY)
-
-    if not records:
-        print("No job records to summarize.")
-        return
 
     durations = [r['duration'] for r in records]
     start_times = [r['start_ts'] for r in records]
@@ -209,40 +233,44 @@ def summarize_batch(strategy, jobs, interval):
 
     errors = [r for r in records if r['status'] != 'SUCCESS']
 
-    print("\n=== Batch Summary ===")
+    print("\n=== Summary ===")
     print(f"Strategy: {strategy}")
     print(f"Jobs Launched: {jobs}")
     print(f"Interval: {interval}s")
     print(f"Average Duration: {sum(durations)/len(durations):.2f}s")
-    print(f"Min Duration: {min(durations):.2f}s | Max Duration: {max(durations):.2f}s")
+    print(
+        f"Min Duration: {min(durations):.2f}s | Max Duration: {max(durations):.2f}s")
     print(f"Makespan (first start to last end): {makespan:.2f}s")
     print("Jobs per worker:")
-    
+
     for wid, count in sorted(per_worker.items()):
         print(f"  - {wid}: {count}")
     if errors:
         print("Errors:")
         for e in errors:
             print(f"  - Job {e['job_id']} on {e['worker_id']}: {e['error']}")
-        
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Distributed Manager")
     parser.add_argument('strategy', nargs='?', choices=['lowest_cpu', 'round_robin'], default='lowest_cpu',
                         help="Worker selection strategy")
-    parser.add_argument('-n', '--jobs', type=int, default=None,
-                        help="Number of jobs to launch (batch mode); default is continuous")
+    parser.add_argument('-n', '--jobs', type=int, required=True,
+                        help="Total number of jobs to launch before shutdown")
     parser.add_argument('-i', '--interval', type=float, default=5.0,
                         help="Seconds between job launches (default 5.0)")
 
     args = parser.parse_args()
     user_strategy = args.strategy
 
-    if args.jobs is not None:
-        print(f"Manager starting in BATCH mode: strategy={user_strategy}, jobs={args.jobs}, interval={args.interval}s")
-    else:
-        print(f"Manager starting in CONTINUOUS mode: strategy={user_strategy}, interval={args.interval}s")
+    if args.jobs <= 0:
+        print("Jobs must be a positive integer.")
+        sys.exit(1)
+
+    print(
+        f"Manager starting: strategy={user_strategy}, jobs={args.jobs}, interval={args.interval}s")
 
     registry_thread = Thread(target=run_registry_server, daemon=True)
     registry_thread.start()
-    manage_workers(strategy=user_strategy, jobs=args.jobs, interval=args.interval)
-    
+    manage_workers(strategy=user_strategy,
+                   jobs=args.jobs, interval=args.interval)
