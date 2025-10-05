@@ -10,7 +10,7 @@ from threading import Thread, Lock
 MANAGER_ADDRESS = ('10.128.0.2', 9999)
 AUTH_KEY = b'secret-key'  # Shared secret for authentication
 
-IDLE_TIMEOUT_SECONDS = 120  # 2 minutes
+# IDLE_TIMEOUT_SECONDS = 120  # 2 minutes
 
 WORKER_REGISTRY = {}
 REGISTRY_LOCK = Lock()
