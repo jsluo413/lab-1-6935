@@ -21,8 +21,9 @@ def get_system_status():
     cpu_status = get_cpu_status()
     mem_status = get_memory_status()
 
-    # Simplified CPU usage approximation
-    cpu_usage = float(cpu_status['lavg_1']) * 100
+    #  CPU usage approximation
+    cpu_cores = os.cpu_count()
+    cpu_usage = float(cpu_status['lavg_1']) * 100 / cpu_cores 
     mem_total = mem_status.get('MemTotal', 1)
     mem_free = mem_status.get(
         'MemFree', 0) + mem_status.get('Buffers', 0) + mem_status.get('Cached', 0)
@@ -40,15 +41,13 @@ FUNCTION_MAP = {
     'calculate_pi': get_pi
 }
 
-# --- Worker's RPC Server for Tasks ---
-
-
 def run_task_server(address):
     with Listener(address, authkey=AUTH_KEY) as listener:
         print(f"Worker listening for tasks on {listener.address}")
         while True:
             try:
                 with listener.accept() as conn:
+                    # Receive the request
                     request = conn.recv()
                     function_name = request.get('function_name')
                     args = request.get('args', [])
@@ -64,7 +63,7 @@ def run_task_server(address):
                     else:
                         response = {
                             'status': 'ERROR', 'message': f"Unknown function: {function_name}"}
-
+                    # Send back the response
                     conn.send(response)
             except Exception as e:
                 print(f"WORKER: Error during task processing: {e}")
