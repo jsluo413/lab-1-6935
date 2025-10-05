@@ -165,6 +165,7 @@ def manage_workers(strategy, jobs, interval=5.0):
 
 
         # Launch new jobs until number of jobs reached
+        now = time.time()
         should_launch = (now - last_launch) >= float(interval)
         can_launch = launched < jobs
         
