@@ -52,9 +52,7 @@ def run_registry_server():
                         WORKER_REGISTRY[worker_id] = {
                             'address': (reg_data['host'], reg_data['port']),
                             'last_seen': time.time(),
-                            'busy': False,
-                            'last_task_start': None,
-                            'last_task_end': time.time()
+                            'busy': False
                         }
                     conn.send({'status': 'SUCCESS', 'worker_id': worker_id})
             except Exception as e:
@@ -85,7 +83,7 @@ def assign_task(job_id, worker_id, addr, meta=None):
         if worker_id in WORKER_REGISTRY:
             # Mark worker as busy
             WORKER_REGISTRY[worker_id]['busy'] = True
-            WORKER_REGISTRY[worker_id]['last_task_start'] = time.time()
+            
     start_ts = time.time()
     response = call_rpc(addr, 'calculate_pi', num_terms=20_000_000)
     end_ts = time.time()
@@ -99,7 +97,7 @@ def assign_task(job_id, worker_id, addr, meta=None):
     with REGISTRY_LOCK:
         if worker_id in WORKER_REGISTRY:
             WORKER_REGISTRY[worker_id]['busy'] = False
-            WORKER_REGISTRY[worker_id]['last_task_end'] = time.time()
+
     # Record job
     job_record = {
         'job_id': job_id,

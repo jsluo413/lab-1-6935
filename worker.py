@@ -41,33 +41,38 @@ FUNCTION_MAP = {
     'calculate_pi': get_pi
 }
 
+# allow the worker to handle multiple connections concurrently
+def handle_connection(conn):
+    try:
+        request = conn.recv()
+        function_name = request.get('function_name')
+        args = request.get('args', [])
+        kwargs = request.get('kwargs', {})
+
+        if function_name in FUNCTION_MAP:
+            try:
+                result = FUNCTION_MAP[function_name](*args, **kwargs)
+                response = {'status': 'SUCCESS', 'result': result}
+            except Exception as e:
+                response = {'status': 'ERROR', 'message': str(e)}
+        else:
+            response = {
+                'status': 'ERROR', 'message': f"Unknown function: {function_name}"}
+        conn.send(response)
+    except Exception as e:
+        print(f"WORKER: Error during connection handling: {e}")
+    finally:
+        conn.close()
+# Worker Server
 def run_task_server(address):
     with Listener(address, authkey=AUTH_KEY) as listener:
         print(f"Worker listening for tasks on {listener.address}")
         while True:
             try:
-                with listener.accept() as conn:
-                    # Receive the request
-                    request = conn.recv()
-                    function_name = request.get('function_name')
-                    args = request.get('args', [])
-                    kwargs = request.get('kwargs', {})
-
-                    if function_name in FUNCTION_MAP:
-                        try:
-                            result = FUNCTION_MAP[function_name](
-                                *args, **kwargs)
-                            response = {'status': 'SUCCESS', 'result': result}
-                        except Exception as e:
-                            response = {'status': 'ERROR', 'message': str(e)}
-                    else:
-                        response = {
-                            'status': 'ERROR', 'message': f"Unknown function: {function_name}"}
-                    # Send back the response
-                    conn.send(response)
+                conn = listener.accept()
+                thread = Thread(target=handle_connection, args=(conn,),daemon=True).start()
             except Exception as e:
                 print(f"WORKER: Error during task processing: {e}")
-
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
