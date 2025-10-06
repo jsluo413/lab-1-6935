@@ -175,7 +175,7 @@ def manage_workers(strategy, jobs, interval=5.0):
             idle_workers = [ w for w in worker_statuses if not WORKER_REGISTRY.get(w['worker_id'], {}).get('busy', False)]
             available_workers = idle_workers if idle_workers else worker_statuses
             best_worker = (select_lowest_cpu(available_workers)if strategy ==
-                           'lowest_cpu'else select_round_robin(available_workers))
+                           'lowest_cpu'else select_round_robin(worker_statuses)) # for round robin, consider all workers (not just idle)
 
             print("\n--- Load Balancing ---")
             worker_id = best_worker['worker_id']
