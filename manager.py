@@ -206,12 +206,13 @@ def manage_workers(strategy, jobs, interval=5.0):
         now = time.time()
         should_launch = (now - last_launch) >= float(interval)
 
-        if worker_statuses and should_launch:
+        job_id = None
+        if should_launch:
             with JOB_QUEUE_LOCK:
-                job_id = job_queue.popleft() if job_queue else None
-            if job_id is None:
-                time.sleep(1)
-                continue
+                if job_queue:
+                    job_id = job_queue.popleft()
+
+        if worker_statuses and job_id is not None:
             # idle detection
             # select only idle workers
             idle_workers = [ w for w in worker_statuses if not WORKER_REGISTRY.get(w['worker_id'], {}).get('busy', False)]
