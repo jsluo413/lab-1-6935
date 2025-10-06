@@ -3,6 +3,7 @@ import time
 import sys
 import argparse
 import os
+from collections import deque
 from multiprocessing.connection import Listener, Client
 from threading import Thread, Lock
 
@@ -18,6 +19,7 @@ REGISTRY_LOCK = Lock()
 # --- Job Tracking ---
 JOB_HISTORY = []
 JOB_LOCK = Lock()
+JOB_QUEUE_LOCK = Lock()
 
 
 
@@ -96,7 +98,7 @@ def select_round_robin(workers):
     return workers[idx]
 
 
-def assign_task(job_id, worker_id, addr, meta=None):
+def assign_task(job_id, worker_id, addr, meta=None, job_queue=None, job_queue_lock=None):
     print(f"JOB {job_id}: Assignning to {worker_id} ({addr[0]}:{addr[1]})")
     with REGISTRY_LOCK:
         if worker_id in WORKER_REGISTRY:
@@ -132,6 +134,20 @@ def assign_task(job_id, worker_id, addr, meta=None):
     }
     with JOB_LOCK:
         JOB_HISTORY.append(job_record)
+    if response.get('status') != 'SUCCESS':
+        error_message = response.get('message')
+        should_remove_worker = isinstance(error_message, str) and (
+            'Communication failed' in error_message or 'timeout' in error_message.lower())
+        if job_queue is not None and job_queue_lock is not None:
+            with job_queue_lock:
+                job_queue.appendleft(job_id)
+            print(f"JOB {job_id}: Re-queued due to failure: {error_message}")
+        if should_remove_worker:
+            with REGISTRY_LOCK:
+                removed = WORKER_REGISTRY.pop(worker_id, None) is not None
+            if removed:
+                print(
+                    f"JOB {job_id}: Removed {worker_id} after communication failure.")
     return response
 
 def manage_workers(strategy, jobs, interval=5.0):
@@ -145,7 +161,7 @@ def manage_workers(strategy, jobs, interval=5.0):
         JOB_HISTORY.clear()
     # last launch timestamp
     last_launch = 0.0
-    launched = 0
+    job_queue = deque(range(1, jobs + 1))
     job_threads = []
     print_interval_header_done = False
 
@@ -189,9 +205,13 @@ def manage_workers(strategy, jobs, interval=5.0):
         # Launch new jobs until number of jobs reached
         now = time.time()
         should_launch = (now - last_launch) >= float(interval)
-        can_launch = launched < jobs
-        
-        if worker_statuses and should_launch and can_launch:
+
+        if worker_statuses and should_launch:
+            with JOB_QUEUE_LOCK:
+                job_id = job_queue.popleft() if job_queue else None
+            if job_id is None:
+                time.sleep(1)
+                continue
             # idle detection
             # select only idle workers
             idle_workers = [ w for w in worker_statuses if not WORKER_REGISTRY.get(w['worker_id'], {}).get('busy', False)]
@@ -205,19 +225,17 @@ def manage_workers(strategy, jobs, interval=5.0):
                 f"Selected worker: {worker_id} with {best_worker['cpu']:.1f}% CPU."
             )
 
-            launched += 1
-            job_id = launched
             last_launch = now
             t = Thread(
                 target=assign_task,
                 args=(job_id, worker_id, best_worker['address'], {
-                      'cpu': best_worker['cpu'], 'mem': best_worker['mem']}),
+                      'cpu': best_worker['cpu'], 'mem': best_worker['mem']}, job_queue, JOB_QUEUE_LOCK),
             )
             t.start()
             job_threads.append(t)
 
         with JOB_LOCK:
-            completed = len(JOB_HISTORY)
+            completed = sum(1 for r in JOB_HISTORY if r['status'] == 'SUCCESS')
 
         if completed >= jobs:
             break
@@ -237,34 +255,43 @@ def manage_workers(strategy, jobs, interval=5.0):
 def summarize_batch(strategy, jobs, interval):
     with JOB_LOCK:
         records = list(JOB_HISTORY)
-    # summary statistics
-    durations = [r['duration'] for r in records]
-    start_times = [r['start_ts'] for r in records]
-    end_times = [r['end_ts'] for r in records]
-    makespan = max(end_times) - min(start_times)
+    success_records = [r for r in records if r['status'] == 'SUCCESS']
+    error_records = [r for r in records if r['status'] != 'SUCCESS']
+
+    durations = [r['duration'] for r in success_records]
+    if durations:
+        start_times = [r['start_ts'] for r in success_records]
+        end_times = [r['end_ts'] for r in success_records]
+        makespan = max(end_times) - min(start_times)
+    else:
+        start_times = []
+        end_times = []
+        makespan = 0.0
 
     per_worker = {}
-    for r in records:
+    for r in success_records:
         per_worker[r['worker_id']] = per_worker.get(r['worker_id'], 0) + 1
-
-    errors = [r for r in records if r['status'] != 'SUCCESS']
 
     print("\n=== Summary ===")
     print(f"Strategy: {strategy}")
     print(f"Jobs Launched: {jobs}")
+    print(f"Jobs Completed: {len(success_records)}")
     print(f"Interval: {interval}s")
-    print(f"Average Duration: {sum(durations)/len(durations):.2f}s")
-    print(
-        f"Min Duration: {min(durations):.2f}s | Max Duration: {max(durations):.2f}s")
-    print(f"Makespan (first start to last end): {makespan:.2f}s")
+    if durations:
+        print(f"Average Duration: {sum(durations)/len(durations):.2f}s")
+        print(
+            f"Min Duration: {min(durations):.2f}s | Max Duration: {max(durations):.2f}s")
+        print(f"Makespan (first start to last end): {makespan:.2f}s")
+    else:
+        print("No successful jobs to compute timing statistics.")
     print("Jobs per worker:")
 
     for wid, count in sorted(per_worker.items()):
         print(f"  - {wid}: {count}")
     # print errors
-    if errors:
+    if error_records:
         print("Errors:")
-        for e in errors:
+        for e in error_records:
             print(f"  - Job {e['job_id']} on {e['worker_id']}: {e['error']}")
 
 
