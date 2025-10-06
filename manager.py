@@ -153,10 +153,12 @@ def manage_workers(strategy, jobs, interval=5.0):
                     if worker_id in WORKER_REGISTRY:
                         WORKER_REGISTRY[worker_id]['last_seen'] = time.time()
                 status = response['result']
+                busy_status = "BUSY" if WORKER_REGISTRY.get(worker_id, {}).get('busy', False) else "IDLE"
+                status['status'] = busy_status
                 worker_statuses.append(
                     {**status, 'address': info['address'], 'worker_id': worker_id})
                 print(
-                    f"{worker_id} | CPU Load: {status['cpu']:.2f} | Memory: {status['mem']:.1f}%")
+                    f"{busy_status}  | {worker_id} | CPU Load: {status['cpu']:.2f}% | Memory: {status['mem']:.1f}%")
             else:
                 print(
                     f"{worker_id} | Status Check Failed: {response['message']}")
