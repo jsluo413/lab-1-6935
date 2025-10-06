@@ -179,8 +179,11 @@ def manage_workers(strategy, jobs, interval=5.0):
                 print(
                     f"{busy_status}  | {worker_id} | CPU Load: {status['cpu']:.2f}% | Memory: {status['mem']:.1f}%")
             else:
-                print(
-                    f"{worker_id} | Status Check Failed: {response['message']}")
+                with REGISTRY_LOCK:
+                    removed = WORKER_REGISTRY.pop(worker_id, None) is not None
+                if removed:
+                    print(f"{worker_id} | Status Check Failed: {response['message']} (removed from registry)")
+
 
 
         # Launch new jobs until number of jobs reached
