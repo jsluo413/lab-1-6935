@@ -33,30 +33,49 @@ def call_rpc(address, function_name, *args, **kwargs):
         return {'status': 'ERROR', 'message': f"Communication failed: {e}"}
 
 
+def handle_worker_registration(conn):
+    """Handle a single worker registration on its own thread."""
+    try:
+        reg_data = conn.recv()
+        with REGISTRY_LOCK:
+            # Assign a unique worker ID
+            if not hasattr(run_registry_server, "_next_worker_id"):
+                run_registry_server._next_worker_id = 1
+            worker_id = f"worker {run_registry_server._next_worker_id}"
+            run_registry_server._next_worker_id += 1
+
+            print(f"REGISTRY: Registering {worker_id}")
+            WORKER_REGISTRY[worker_id] = {
+                'address': (reg_data['host'], reg_data['port']),
+                'last_seen': time.time(),
+                'busy': False
+            }
+        conn.send({'status': 'SUCCESS', 'worker_id': worker_id})
+    except Exception as e:
+        # Try to inform the client if possible
+        try:
+            conn.send({'status': 'ERROR', 'message': str(e)})
+        except Exception:
+            pass
+        print(f"REGISTRY: Error during registration: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def run_registry_server():
-    """Listens for worker registrations."""
+    """Listens for worker registrations concurrently."""
     with Listener(MANAGER_ADDRESS, authkey=AUTH_KEY) as listener:
         print(f"Manager listening for registrations on {listener.address}")
         while True:
             try:
-                with listener.accept() as conn:
-                    reg_data = conn.recv()
-                    with REGISTRY_LOCK:
-                        # Assign a unique worker ID
-                        if not hasattr(run_registry_server, "_next_worker_id"):
-                            run_registry_server._next_worker_id = 1
-                        worker_id = f"worker {run_registry_server._next_worker_id}"
-                        run_registry_server._next_worker_id += 1
-
-                        print(f"REGISTRY: Registering {worker_id}")
-                        WORKER_REGISTRY[worker_id] = {
-                            'address': (reg_data['host'], reg_data['port']),
-                            'last_seen': time.time(),
-                            'busy': False
-                        }
-                    conn.send({'status': 'SUCCESS', 'worker_id': worker_id})
+                conn = listener.accept()
+                # Hand off to a dedicated thread so multiple workers can register concurrently
+                Thread(target=handle_worker_registration, args=(conn,), daemon=True).start()
             except Exception as e:
-                print(f"REGISTRY: Error during registration: {e}")
+                print(f"REGISTRY: Error accepting registration: {e}")
 
 def select_lowest_cpu(workers):
     """Selects the worker with the lowest CPU usage."""
